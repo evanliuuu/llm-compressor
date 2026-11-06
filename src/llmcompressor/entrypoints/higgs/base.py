@@ -93,7 +93,8 @@ class HiggsMSECollectorConverter(Converter):
         resolved = {}
         for scheme in schemes:
             if isinstance(scheme, str):
-                resolved[scheme] = preset_name_to_scheme(scheme, targets=self.targets)
+                key = scheme
+                scheme = preset_name_to_scheme(scheme, targets=self.targets)
             elif isinstance(scheme, QuantizationScheme):
                 if scheme.weights:
                     key = f"W{scheme.weights.num_bits}"
@@ -104,9 +105,17 @@ class HiggsMSECollectorConverter(Converter):
                     )
                 else:
                     key = f"scheme_{len(resolved)}"
-                resolved[key] = scheme
             else:
                 raise ValueError(f"Invalid scheme type: {type(scheme)}")
+
+            # Bitwidth and preset names do not identify group size, symmetry,
+            # or dtype, so distinct candidates can share a base key.
+            suffix = 1
+            unique_key = key
+            while unique_key in resolved:
+                unique_key = f"{key}_{suffix}"
+                suffix += 1
+            resolved[unique_key] = scheme
         return resolved
 
     def validate(self, tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
