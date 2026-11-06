@@ -108,8 +108,11 @@ class HiggsMSECollectorConverter(Converter):
             else:
                 raise ValueError(f"Invalid scheme type: {type(scheme)}")
 
-            # Bitwidth and preset names do not identify group size, symmetry,
-            # or dtype, so distinct candidates can share a base key.
+            # Identical schemes collapse, including a preset repeated or a
+            # custom scheme equal to one already kept. Suffix only when a
+            # different scheme shares that readable name.
+            if scheme in resolved.values():
+                continue
             suffix = 1
             unique_key = key
             while unique_key in resolved:
