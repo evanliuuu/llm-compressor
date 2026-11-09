@@ -172,11 +172,23 @@ def _collapse_expert_patterns(layer_list: list[str]) -> list[str]:
     return targets
 
 
+def _infer_scheme_format(scheme: QuantizationScheme) -> str:
+    """Return the candidate format, inferring it when the scheme leaves it unset."""
+    if scheme.format is not None:
+        return scheme.format
+    dummy = torch.nn.Linear(64, 64, bias=False)
+    initialize_module_for_quantization(dummy, scheme, force_zero_point=False)
+    return infer_module_format(type(dummy), scheme).value
+
+
 def generate_config_groups(
     ilp_solution: Dict[str, str],
     candidate_schemes: Dict[str, QuantizationScheme],
 ) -> Dict[str, QuantizationScheme]:
-    """Convert ILP assignments into config groups with targets and formats."""
+    """Convert ILP assignments into config groups.
+
+    Targets become the assigned layers. Format is copied from the candidate.
+    """
     scheme_to_layers: dict[str, list[str]] = defaultdict(list)
     for layer, scheme_name in ilp_solution.items():
         scheme_to_layers[scheme_name].append(layer)
@@ -195,13 +207,6 @@ def generate_config_groups(
 
         scheme_dict = base_scheme.model_dump()
         scheme_dict["targets"] = _collapse_expert_patterns(sorted(layer_list))
-
-        if base_scheme.format is None:
-            dummy = torch.nn.Linear(64, 64, bias=False)
-            initialize_module_for_quantization(
-                dummy, base_scheme, force_zero_point=False
-            )
-            scheme_dict["format"] = infer_module_format(type(dummy), base_scheme).value
 
         group_name = f"group_{idx}"
         config_groups[group_name] = QuantizationScheme(**scheme_dict)

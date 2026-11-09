@@ -1,5 +1,6 @@
 """Regression tests for HIGGS candidate scheme registration."""
 
+import pytest
 import torch
 from compressed_tensors.config import CompressionFormat
 from compressed_tensors.quantization import (
@@ -44,6 +45,26 @@ def _sample_tensors(n=2):
     }
 
 
+def _packed_w4():
+    return QuantizationScheme(
+        targets=["Linear"],
+        weights=_group_w4(128).weights,
+        format=CompressionFormat.pack_quantized,
+    )
+
+
+def _assert_one_w4_group(collector):
+    collector.process(_sample_tensors(16))
+    config = collector.create_config()
+    w4_groups = [
+        group for group in config.config_groups.values() if group.weights.num_bits == 4
+    ]
+    assert set(collector.ilp_solution.values()) == {"W4A16", "W8A16"}
+    assert len(config.config_groups) == 2
+    assert len(w4_groups) == 1
+    assert w4_groups[0].weights.group_size == 128
+
+
 def test_unique_schemes_keep_readable_names():
     """Presets and unique bitwidth schemes stay keyed as W{n}A{m}."""
     custom_w4 = _group_w4(128)
@@ -68,13 +89,14 @@ def test_unique_schemes_keep_readable_names():
     )
 
     assert list(presets.candidate_schemes) == ["W4A16", "W8A16"]
-    assert presets.candidate_schemes["W4A16"] == preset_name_to_scheme(
-        "W4A16", targets=["Linear"]
+    assert (
+        presets.candidate_schemes["W4A16"].weights
+        == preset_name_to_scheme("W4A16", targets=["Linear"]).weights
     )
     assert list(readme.candidate_schemes) == ["W4A16", "W8A16"]
-    assert readme.candidate_schemes["W4A16"] is custom_w4
+    assert readme.candidate_schemes["W4A16"].weights == custom_w4.weights
     assert list(objects.candidate_schemes) == ["W4A16", "W8A16"]
-    assert objects.candidate_schemes["W8A16"] is custom_w8
+    assert objects.candidate_schemes["W8A16"].weights == custom_w8.weights
 
 
 def test_keeps_w4a16_schemes_that_differ_by_group_size():
@@ -86,8 +108,8 @@ def test_keeps_w4a16_schemes_that_differ_by_group_size():
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
-    assert collector.candidate_schemes["W4A16"] is group_32
-    assert collector.candidate_schemes["W4A16_1"] is group_128
+    assert collector.candidate_schemes["W4A16"].weights.group_size == 32
+    assert collector.candidate_schemes["W4A16_1"].weights.group_size == 128
 
 
 def test_keeps_preset_and_custom_scheme_with_the_same_bitwidth_name():
@@ -98,10 +120,11 @@ def test_keeps_preset_and_custom_scheme_with_the_same_bitwidth_name():
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
-    assert collector.candidate_schemes["W4A16"] == preset_name_to_scheme(
-        "W4A16", targets=["Linear"]
+    assert (
+        collector.candidate_schemes["W4A16"].weights
+        == preset_name_to_scheme("W4A16", targets=["Linear"]).weights
     )
-    assert collector.candidate_schemes["W4A16_1"] is custom
+    assert collector.candidate_schemes["W4A16_1"].weights.group_size == 32
 
 
 def test_keeps_w4a16_schemes_that_differ_by_symmetry():
@@ -113,8 +136,8 @@ def test_keeps_w4a16_schemes_that_differ_by_symmetry():
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
-    assert collector.candidate_schemes["W4A16"] is symmetric
-    assert collector.candidate_schemes["W4A16_1"] is asymmetric
+    assert collector.candidate_schemes["W4A16"].weights.symmetric is True
+    assert collector.candidate_schemes["W4A16_1"].weights.symmetric is False
 
 
 def test_process_records_mse_for_every_colliding_candidate():
@@ -153,11 +176,13 @@ def test_duplicate_presets_collapse_to_one_entry():
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W8A16"]
-    assert collector.candidate_schemes["W4A16"] == preset_name_to_scheme(
-        "W4A16", targets=["Linear"]
+    assert (
+        collector.candidate_schemes["W4A16"].weights
+        == preset_name_to_scheme("W4A16", targets=["Linear"]).weights
     )
-    assert collector.candidate_schemes["W8A16"] == preset_name_to_scheme(
-        "W8A16", targets=["Linear"]
+    assert (
+        collector.candidate_schemes["W8A16"].weights
+        == preset_name_to_scheme("W8A16", targets=["Linear"]).weights
     )
 
 
@@ -177,9 +202,9 @@ def test_custom_scheme_equal_to_preset_collapses():
     )
 
     assert list(preset_first.candidate_schemes) == ["W4A16"]
-    assert preset_first.candidate_schemes["W4A16"] == preset
+    assert preset_first.candidate_schemes["W4A16"].weights == preset.weights
     assert list(custom_first.candidate_schemes) == ["W4A16"]
-    assert custom_first.candidate_schemes["W4A16"] is custom_w4
+    assert custom_first.candidate_schemes["W4A16"].weights == custom_w4.weights
 
 
 def test_equal_custom_schemes_collapse_before_suffix():
@@ -190,7 +215,7 @@ def test_equal_custom_schemes_collapse_before_suffix():
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
-    assert collector.candidate_schemes["W4A16"] is first_group_32
+    assert collector.candidate_schemes["W4A16"].weights.group_size == 32
     assert collector.candidate_schemes["W4A16_1"].weights.group_size == 128
 
 
@@ -214,16 +239,7 @@ def test_duplicate_presets_yield_one_w4a16_group(require_higgs_cbc):
         ignore=[],
         target_avg_bitwidth=6.0,
     )
-    collector.process(_sample_tensors(16))
-    config = collector.create_config()
-
-    assert set(collector.ilp_solution.values()) == {"W4A16", "W8A16"}
-    w4_groups = [
-        group for group in config.config_groups.values() if group.weights.num_bits == 4
-    ]
-    assert len(config.config_groups) == 2
-    assert len(w4_groups) == 1
-    assert w4_groups[0].weights.group_size == 128
+    _assert_one_w4_group(collector)
 
 
 def test_targets_are_not_part_of_candidate_identity(require_higgs_cbc):
@@ -238,32 +254,40 @@ def test_targets_are_not_part_of_candidate_identity(require_higgs_cbc):
     )
 
     assert list(collector.candidate_schemes) == ["W4A16", "W8A16"]
-    assert collector.candidate_schemes["W4A16"] is custom
-
-    collector.process(_sample_tensors(16))
-    config = collector.create_config()
-
-    assert set(collector.ilp_solution.values()) == {"W4A16", "W8A16"}
-    w4_groups = [
-        group for group in config.config_groups.values() if group.weights.num_bits == 4
-    ]
-    assert len(config.config_groups) == 2
-    assert len(w4_groups) == 1
-    assert w4_groups[0].weights.group_size == 128
+    _assert_one_w4_group(collector)
 
 
-def test_different_format_is_not_collapsed():
-    default_format = _group_w4(128)
-    packed = QuantizationScheme(
-        targets=["Linear"],
-        weights=default_format.weights,
-        format=CompressionFormat.pack_quantized,
-    )
+def test_unset_format_collapses_with_explicit_pack_format(require_higgs_cbc):
     collector = HiggsMSECollectorConverter(
-        candidate_schemes=[default_format, packed],
+        candidate_schemes=[_group_w4(128), _packed_w4(), "W8A16"],
         ignore=[],
+        target_avg_bitwidth=6.0,
     )
 
-    assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
-    assert collector.candidate_schemes["W4A16"] is default_format
-    assert collector.candidate_schemes["W4A16_1"] is packed
+    assert list(collector.candidate_schemes) == ["W4A16", "W8A16"]
+    _assert_one_w4_group(collector)
+
+
+def test_explicit_pack_format_collapses_with_w4a16_preset(require_higgs_cbc):
+    collector = HiggsMSECollectorConverter(
+        candidate_schemes=[_packed_w4(), "W4A16", "W8A16"],
+        ignore=[],
+        target_avg_bitwidth=6.0,
+    )
+
+    assert list(collector.candidate_schemes) == ["W4A16", "W8A16"]
+    _assert_one_w4_group(collector)
+
+
+def test_conflicting_explicit_formats_are_rejected():
+    naive = QuantizationScheme(
+        targets=["Linear"],
+        weights=_group_w4(128).weights,
+        format=CompressionFormat.naive_quantized,
+    )
+
+    with pytest.raises(ValueError, match="compression formats"):
+        HiggsMSECollectorConverter(
+            candidate_schemes=[_packed_w4(), naive],
+            ignore=[],
+        )

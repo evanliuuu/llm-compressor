@@ -34,6 +34,7 @@ from llmcompressor.entrypoints.higgs.ilp_solver import (
 )
 from llmcompressor.entrypoints.higgs.utils import (
     UNQUANTIZED_SCHEME,
+    _infer_scheme_format,
     compute_fused_layer_mse,
     compute_heuristic_alphas,
     compute_layer_mse,
@@ -54,11 +55,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Phase 1: MSE collection and ILP solving
 # ---------------------------------------------------------------------------
-
-
-def _candidate_identity(scheme: QuantizationScheme) -> dict:
-    """Fields that distinguish candidates. HIGGS replaces targets from the ILP."""
-    return scheme.model_dump(exclude={"targets"})
 
 
 class HiggsMSECollectorConverter(Converter):
@@ -114,12 +110,29 @@ class HiggsMSECollectorConverter(Converter):
             else:
                 raise ValueError(f"Invalid scheme type: {type(candidate)}")
 
-            # Targets are not identity: the ILP overwrites them. Format and
-            # quantization args are. Suffix only when a different scheme
-            # shares the readable name.
-            identity = _candidate_identity(resolved_scheme)
-            if any(_candidate_identity(kept) == identity for kept in resolved.values()):
+            # Targets are replaced by the ILP layer list, and an unset format
+            # is the format inference would write into the config. Compare
+            # those canonical schemes so duplicates collapse.
+            resolved_scheme = resolved_scheme.model_copy(
+                update={
+                    "targets": self.targets,
+                    "format": _infer_scheme_format(resolved_scheme),
+                }
+            )
+            if any(resolved_scheme == kept for kept in resolved.values()):
                 continue
+            for kept in resolved.values():
+                same_args = (
+                    resolved_scheme.model_copy(update={"format": kept.format}) == kept
+                )
+                if same_args:
+                    raise ValueError(
+                        "HIGGS candidates use the same quantization args but "
+                        "different compression formats "
+                        f"({kept.format} and {resolved_scheme.format}). "
+                        "The ILP cannot choose between them. Pass only one "
+                        "of these formats."
+                    )
             suffix = 1
             unique_key = key
             while unique_key in resolved:
