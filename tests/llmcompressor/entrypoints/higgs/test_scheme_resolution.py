@@ -9,7 +9,10 @@ from compressed_tensors.quantization import (
     preset_name_to_scheme,
 )
 
-from llmcompressor.entrypoints.higgs import HiggsMSECollectorConverter
+from llmcompressor.entrypoints.higgs import (
+    HiggsMSECollectorConverter,
+    generate_config_groups,
+)
 
 
 def _group_w4(group_size, targets=None):
@@ -50,6 +53,18 @@ def _packed_w4():
         targets=["Linear"],
         weights=_group_w4(128).weights,
         format=CompressionFormat.pack_quantized,
+    )
+
+
+def _w8_channel():
+    return QuantizationArgs(
+        num_bits=8, type="int", strategy="channel", symmetric=True, dynamic=False
+    )
+
+
+def _tensor_act(dynamic):
+    return QuantizationArgs(
+        num_bits=8, type="int", strategy="tensor", symmetric=True, dynamic=dynamic
     )
 
 
@@ -286,8 +301,77 @@ def test_conflicting_explicit_formats_are_rejected():
         format=CompressionFormat.naive_quantized,
     )
 
-    with pytest.raises(ValueError, match="compression formats"):
+    with pytest.raises(ValueError, match="format"):
         HiggsMSECollectorConverter(
             candidate_schemes=[_packed_w4(), naive],
             ignore=[],
         )
+
+
+def test_generate_config_groups_infers_unset_format():
+    scheme = _group_w4(128)
+    assert scheme.format is None
+
+    groups = generate_config_groups(
+        {"l0": "W4", "l1": "W4"},
+        {"W4": scheme},
+    )
+
+    assert groups["group_0"].format == "pack-quantized"
+
+
+def test_activation_dynamic_conflict_is_rejected():
+    static = QuantizationScheme(
+        targets=["Linear"],
+        weights=_w8_channel(),
+        input_activations=_tensor_act(False),
+    )
+    dynamic = QuantizationScheme(
+        targets=["Linear"],
+        weights=_w8_channel(),
+        input_activations=_tensor_act(True),
+    )
+
+    with pytest.raises(ValueError, match="input_activations"):
+        HiggsMSECollectorConverter(
+            candidate_schemes=[static, dynamic],
+            ignore=[],
+        )
+
+
+def test_output_activation_conflict_is_rejected():
+    weights = _group_w4(128).weights
+    plain = QuantizationScheme(targets=["Linear"], weights=weights)
+    with_output = QuantizationScheme(
+        targets=["Linear"],
+        weights=weights,
+        output_activations=_tensor_act(False),
+    )
+
+    with pytest.raises(ValueError, match="output_activations"):
+        HiggsMSECollectorConverter(
+            candidate_schemes=[plain, with_output],
+            ignore=[],
+        )
+
+
+def test_weight_observer_difference_is_kept():
+    plain = _group_w4(128)
+    observed = QuantizationScheme(
+        targets=["Linear"],
+        weights=QuantizationArgs(
+            num_bits=4,
+            type="int",
+            symmetric=True,
+            strategy="group",
+            group_size=128,
+            observer="minmax",
+        ),
+    )
+    collector = HiggsMSECollectorConverter(
+        candidate_schemes=[plain, observed],
+        ignore=[],
+    )
+
+    assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
+    assert collector.candidate_schemes["W4A16_1"].weights.observer == "minmax"

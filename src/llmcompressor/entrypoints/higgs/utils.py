@@ -33,6 +33,7 @@ __all__ = [
     "compute_fused_layer_mse",
     "compute_heuristic_alphas",
     "generate_config_groups",
+    "infer_scheme_format",
 ]
 
 
@@ -172,7 +173,7 @@ def _collapse_expert_patterns(layer_list: list[str]) -> list[str]:
     return targets
 
 
-def _infer_scheme_format(scheme: QuantizationScheme) -> str:
+def infer_scheme_format(scheme: QuantizationScheme) -> str:
     """Return the candidate format, inferring it when the scheme leaves it unset."""
     if scheme.format is not None:
         return scheme.format
@@ -187,7 +188,7 @@ def generate_config_groups(
 ) -> Dict[str, QuantizationScheme]:
     """Convert ILP assignments into config groups.
 
-    Targets become the assigned layers. Format is copied from the candidate.
+    Targets become the assigned layers. An unset format is inferred.
     """
     scheme_to_layers: dict[str, list[str]] = defaultdict(list)
     for layer, scheme_name in ilp_solution.items():
@@ -207,6 +208,7 @@ def generate_config_groups(
 
         scheme_dict = base_scheme.model_dump()
         scheme_dict["targets"] = _collapse_expert_patterns(sorted(layer_list))
+        scheme_dict["format"] = infer_scheme_format(base_scheme)
 
         group_name = f"group_{idx}"
         config_groups[group_name] = QuantizationScheme(**scheme_dict)

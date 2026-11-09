@@ -34,11 +34,11 @@ from llmcompressor.entrypoints.higgs.ilp_solver import (
 )
 from llmcompressor.entrypoints.higgs.utils import (
     UNQUANTIZED_SCHEME,
-    _infer_scheme_format,
     compute_fused_layer_mse,
     compute_heuristic_alphas,
     compute_layer_mse,
     generate_config_groups,
+    infer_scheme_format,
 )
 from llmcompressor.entrypoints.model_free.converter import split_fused_moe_experts
 from llmcompressor.entrypoints.model_free.microscale import (
@@ -55,6 +55,42 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Phase 1: MSE collection and ILP solving
 # ---------------------------------------------------------------------------
+
+_SCHEME_FIELDS = (
+    "format",
+    "weights",
+    "input_activations",
+    "output_activations",
+    "targets",
+)
+
+
+def higgs_distinguishable_key(scheme: QuantizationScheme):
+    """Weight args and weight/activation bitwidths, which are all the ILP sees.
+
+    Layer MSE is fake-quantized from ``scheme.weights`` only
+    (``compute_fused_layer_mse``). Bitwidth constraints read
+    ``weights.num_bits`` and ``input_activations.num_bits`` (``create_config``).
+    """
+    weights = scheme.weights
+    activations = scheme.input_activations
+    weight_bits = 16.0 if weights is None else float(weights.num_bits)
+    act_bits = 16.0 if activations is None else float(activations.num_bits)
+    return (weights, weight_bits, act_bits)
+
+
+def _indistinguishable_candidate_message(
+    left: QuantizationScheme, right: QuantizationScheme
+) -> str:
+    fields = [
+        name for name in _SCHEME_FIELDS if getattr(left, name) != getattr(right, name)
+    ]
+    differing = ", ".join(fields) if fields else "unlisted fields"
+    return (
+        "HIGGS candidates have the same weight args and bitwidths, so the ILP "
+        f"cannot tell them apart, but they differ in {differing}. "
+        "Pass only one of these candidates."
+    )
 
 
 class HiggsMSECollectorConverter(Converter):
@@ -88,57 +124,61 @@ class HiggsMSECollectorConverter(Converter):
         self.optimal_config: Optional[QuantizationConfig] = None
         self._fused_partners: Optional[Dict[str, set[str]]] = None
 
+    def _canonical_candidate(
+        self, candidate: Union[str, QuantizationScheme]
+    ) -> tuple[str, QuantizationScheme]:
+        """Readable label plus the scheme HIGGS will compare and emit."""
+        if isinstance(candidate, str):
+            label = candidate
+            scheme = preset_name_to_scheme(candidate, targets=self.targets)
+        elif isinstance(candidate, QuantizationScheme):
+            scheme = candidate
+            if scheme.weights:
+                label = f"W{scheme.weights.num_bits}"
+                label += (
+                    f"A{scheme.input_activations.num_bits}"
+                    if scheme.input_activations
+                    else "A16"
+                )
+            else:
+                label = "scheme"
+        else:
+            raise ValueError(f"Invalid scheme type: {type(candidate)}")
+        scheme = scheme.model_copy(
+            update={
+                "targets": self.targets,
+                "format": infer_scheme_format(scheme),
+            }
+        )
+        return label, scheme
+
     def _resolve_schemes(
         self, schemes: List[Union[str, QuantizationScheme]]
     ) -> Dict[str, QuantizationScheme]:
         resolved = {}
         for candidate in schemes:
-            if isinstance(candidate, str):
-                key = candidate
-                resolved_scheme = preset_name_to_scheme(candidate, targets=self.targets)
-            elif isinstance(candidate, QuantizationScheme):
-                resolved_scheme = candidate
-                if resolved_scheme.weights:
-                    key = f"W{resolved_scheme.weights.num_bits}"
-                    key += (
-                        f"A{resolved_scheme.input_activations.num_bits}"
-                        if resolved_scheme.input_activations
-                        else "A16"
-                    )
-                else:
-                    key = f"scheme_{len(resolved)}"
-            else:
-                raise ValueError(f"Invalid scheme type: {type(candidate)}")
-
-            # Targets are replaced by the ILP layer list, and an unset format
-            # is the format inference would write into the config. Compare
-            # those canonical schemes so duplicates collapse.
-            resolved_scheme = resolved_scheme.model_copy(
-                update={
-                    "targets": self.targets,
-                    "format": _infer_scheme_format(resolved_scheme),
-                }
-            )
-            if any(resolved_scheme == kept for kept in resolved.values()):
+            label, scheme = self._canonical_candidate(candidate)
+            incoming = higgs_distinguishable_key(scheme)
+            duplicate = False
+            label_taken = False
+            max_suffix = 0
+            prefix = f"{label}_"
+            for kept_label, kept in resolved.items():
+                if scheme == kept:
+                    duplicate = True
+                    break
+                if incoming == higgs_distinguishable_key(kept):
+                    raise ValueError(_indistinguishable_candidate_message(scheme, kept))
+                if kept_label == label:
+                    label_taken = True
+                    continue
+                tail = kept_label[len(prefix) :]
+                if kept_label.startswith(prefix) and tail.isdigit():
+                    max_suffix = max(max_suffix, int(tail))
+            if duplicate:
                 continue
-            for kept in resolved.values():
-                same_args = (
-                    resolved_scheme.model_copy(update={"format": kept.format}) == kept
-                )
-                if same_args:
-                    raise ValueError(
-                        "HIGGS candidates use the same quantization args but "
-                        "different compression formats "
-                        f"({kept.format} and {resolved_scheme.format}). "
-                        "The ILP cannot choose between them. Pass only one "
-                        "of these formats."
-                    )
-            suffix = 1
-            unique_key = key
-            while unique_key in resolved:
-                unique_key = f"{key}_{suffix}"
-                suffix += 1
-            resolved[unique_key] = resolved_scheme
+            unique = f"{label}_{max_suffix + 1}" if label_taken else label
+            resolved[unique] = scheme
         return resolved
 
     def validate(self, tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
