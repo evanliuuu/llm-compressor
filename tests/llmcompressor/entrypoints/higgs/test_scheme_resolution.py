@@ -1,6 +1,7 @@
 """Regression tests for HIGGS candidate scheme registration."""
 
 import torch
+from compressed_tensors.config import CompressionFormat
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
@@ -10,9 +11,9 @@ from compressed_tensors.quantization import (
 from llmcompressor.entrypoints.higgs import HiggsMSECollectorConverter
 
 
-def _group_w4(group_size):
+def _group_w4(group_size, targets=None):
     return QuantizationScheme(
-        targets=["Linear"],
+        targets=["Linear"] if targets is None else targets,
         weights=QuantizationArgs(
             num_bits=4,
             type="int",
@@ -35,11 +36,11 @@ def _channel_w4(symmetric):
     )
 
 
-def _sample_tensors():
+def _sample_tensors(n=2):
     torch.manual_seed(0)
     return {
         f"model.layers.{i}.mlp.down_proj.weight": torch.randn(128, 128)
-        for i in range(2)
+        for i in range(n)
     }
 
 
@@ -213,13 +214,7 @@ def test_duplicate_presets_yield_one_w4a16_group(require_higgs_cbc):
         ignore=[],
         target_avg_bitwidth=6.0,
     )
-    torch.manual_seed(0)
-    tensors = {
-        f"model.layers.{i}.mlp.down_proj.weight": torch.randn(128, 128)
-        for i in range(16)
-    }
-
-    collector.process(tensors)
+    collector.process(_sample_tensors(16))
     config = collector.create_config()
 
     assert set(collector.ilp_solution.values()) == {"W4A16", "W8A16"}
@@ -229,3 +224,46 @@ def test_duplicate_presets_yield_one_w4a16_group(require_higgs_cbc):
     assert len(config.config_groups) == 2
     assert len(w4_groups) == 1
     assert w4_groups[0].weights.group_size == 128
+
+
+def test_targets_are_not_part_of_candidate_identity(require_higgs_cbc):
+    """A custom W4A16 that differs only by targets collapses with the preset."""
+    custom = _group_w4(128, ["re:.*proj"])
+    preset = preset_name_to_scheme("W4A16", targets=["Linear"])
+    assert custom != preset
+    collector = HiggsMSECollectorConverter(
+        candidate_schemes=[custom, "W4A16", "W8A16"],
+        ignore=[],
+        target_avg_bitwidth=6.0,
+    )
+
+    assert list(collector.candidate_schemes) == ["W4A16", "W8A16"]
+    assert collector.candidate_schemes["W4A16"] is custom
+
+    collector.process(_sample_tensors(16))
+    config = collector.create_config()
+
+    assert set(collector.ilp_solution.values()) == {"W4A16", "W8A16"}
+    w4_groups = [
+        group for group in config.config_groups.values() if group.weights.num_bits == 4
+    ]
+    assert len(config.config_groups) == 2
+    assert len(w4_groups) == 1
+    assert w4_groups[0].weights.group_size == 128
+
+
+def test_different_format_is_not_collapsed():
+    default_format = _group_w4(128)
+    packed = QuantizationScheme(
+        targets=["Linear"],
+        weights=default_format.weights,
+        format=CompressionFormat.pack_quantized,
+    )
+    collector = HiggsMSECollectorConverter(
+        candidate_schemes=[default_format, packed],
+        ignore=[],
+    )
+
+    assert list(collector.candidate_schemes) == ["W4A16", "W4A16_1"]
+    assert collector.candidate_schemes["W4A16"] is default_format
+    assert collector.candidate_schemes["W4A16_1"] is packed

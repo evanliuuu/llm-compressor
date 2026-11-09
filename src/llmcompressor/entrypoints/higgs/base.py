@@ -56,6 +56,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _candidate_identity(scheme: QuantizationScheme) -> dict:
+    """Fields that distinguish candidates. HIGGS replaces targets from the ILP."""
+    return scheme.model_dump(exclude={"targets"})
+
+
 class HiggsMSECollectorConverter(Converter):
     """
     First-pass converter that collects per-layer MSE data, solves the ILP,
@@ -91,34 +96,36 @@ class HiggsMSECollectorConverter(Converter):
         self, schemes: List[Union[str, QuantizationScheme]]
     ) -> Dict[str, QuantizationScheme]:
         resolved = {}
-        for scheme in schemes:
-            if isinstance(scheme, str):
-                key = scheme
-                scheme = preset_name_to_scheme(scheme, targets=self.targets)
-            elif isinstance(scheme, QuantizationScheme):
-                if scheme.weights:
-                    key = f"W{scheme.weights.num_bits}"
+        for candidate in schemes:
+            if isinstance(candidate, str):
+                key = candidate
+                resolved_scheme = preset_name_to_scheme(candidate, targets=self.targets)
+            elif isinstance(candidate, QuantizationScheme):
+                resolved_scheme = candidate
+                if resolved_scheme.weights:
+                    key = f"W{resolved_scheme.weights.num_bits}"
                     key += (
-                        f"A{scheme.input_activations.num_bits}"
-                        if scheme.input_activations
+                        f"A{resolved_scheme.input_activations.num_bits}"
+                        if resolved_scheme.input_activations
                         else "A16"
                     )
                 else:
                     key = f"scheme_{len(resolved)}"
             else:
-                raise ValueError(f"Invalid scheme type: {type(scheme)}")
+                raise ValueError(f"Invalid scheme type: {type(candidate)}")
 
-            # Identical schemes collapse, including a preset repeated or a
-            # custom scheme equal to one already kept. Suffix only when a
-            # different scheme shares that readable name.
-            if scheme in resolved.values():
+            # Targets are not identity: the ILP overwrites them. Format and
+            # quantization args are. Suffix only when a different scheme
+            # shares the readable name.
+            identity = _candidate_identity(resolved_scheme)
+            if any(_candidate_identity(kept) == identity for kept in resolved.values()):
                 continue
             suffix = 1
             unique_key = key
             while unique_key in resolved:
                 unique_key = f"{key}_{suffix}"
                 suffix += 1
-            resolved[unique_key] = scheme
+            resolved[unique_key] = resolved_scheme
         return resolved
 
     def validate(self, tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
